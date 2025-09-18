@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./veramo_backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./veramo_backend/.env
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+      - ./veramo_backend/logs:/app/logs
+    expose:
+      - 8000
+    networks:
+      - app_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./veramo_backend/frontend
+      dockerfile: Dockerfile
+    env_file:
+      - ./veramo_backend/frontend/.env
+    ports:
+      - "80:80"
+    volumes:
+      - ./veramo_backend/frontend/nginx/ssl:/etc/nginx/ssl
+      - ./veramo_backend/frontend/logs:/var/log/nginx
+    depends_on:
+      - backend
+    networks:
+      - app_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  static_volume:
+  media_volume:
+
+networks:
+  app_network:
+    driver: bridge 

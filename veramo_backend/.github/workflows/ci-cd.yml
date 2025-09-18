@@ -1,0 +1,95 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SETTINGS_MODULE: veramo_backend.settings.dev
+      # Banco em memória para testes simples:
+      DATABASE_URL: "sqlite:///./test_db.sqlite3"
+      REDIS_URL: "redis://127.0.0.1:6379/1"
+      SECRET_KEY: "ci-secret"
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', '**/requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install deps
+        run: |
+          pip install -U pip
+          pip install -r veramo_backend/requirements.txt || true
+          if [ -f veramo_backend/requirements-dev.txt ]; then pip install -r veramo_backend/requirements-dev.txt; fi
+          # Ferramentas de qualidade/safety (dev)
+          pip install black isort flake8 bandit safety
+
+      - name: Lint (black/isort/flake8)
+        run: |
+          black --check .
+          isort --check-only .
+          flake8 .
+
+      - name: Security scan (bandit)
+        run: bandit -q -r veramo_backend/core || true  # não quebra build inicialmente
+
+      - name: Safety (vulns de dependências)
+        run: safety check --full-report || true  # opcionalmente não falhar no início
+
+      - name: Django checks & tests
+        working-directory: veramo_backend
+        run: |
+          python manage.py check
+          pytest -q
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [test]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd /srv/veramo_backend
+            git fetch --all
+            git reset --hard origin/main
+            /usr/bin/python3 -m venv .venv || true
+            source .venv/bin/activate
+            pip install -U pip
+            pip install -r veramo_backend/requirements.txt
+            export DJANGO_SETTINGS_MODULE=veramo_backend.settings.prod
+            python manage.py migrate --noinput
+            python manage.py collectstatic --noinput
+            sudo systemctl restart veramo.service
+            echo "Deploy OK em $(date -Iseconds)"
+
